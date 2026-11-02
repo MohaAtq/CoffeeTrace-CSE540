@@ -158,26 +158,20 @@ registerBatch("Finca El Paraiso, Huila, Colombia", "2.1167,-75.8833", "Arabica",
 getBatch(1) · getCustodyHistory(1) · getConditionReadings(1)
 ```
 
-### Optional: Hardhat
-```bash
-npm install
-npx hardhat compile
-```
 
 ---
+## Plan
 
-## 6. Roadmap
+**Interim Demo (Nov 15)**
+- Deploy the contract on Polygon Amoy
+- Make a simple web page (Ethers.js + MetaMask) to register and transfer batches
+- Show one full flow: farmer -> exporter -> roaster -> retailer
 
-| Milestone | Date | Scope |
-|---|---|---|
-| ✅ Proposal + Team Contract | Oct 25 | System concept and architecture |
-| ✅ **Smart Contract Draft** | **Nov 1** | Contract structure, interfaces, core logic, README |
-| ⏳ Interim Demo | Nov 15 | Deploy to Amoy, simple web UI, IPFS upload, end-to-end demo |
-| ⏳ Final Project | Dec 4 | QR verification page, IoT oracle script, tests, gas analysis, report |
-
-**Stretch goals:** alerts when temperature/humidity go out of range; splitting one batch into
-smaller retail bags; certificate revocation.
-
+**Final Project (Dec 4)**
+- Add a customer page to check a batch by ID or QR code
+- Upload certificates to IPFS
+- Write a script for the fake sensor
+- Add tests and check gas costs
 ---
 
 ## 7. References
