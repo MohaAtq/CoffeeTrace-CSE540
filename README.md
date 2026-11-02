@@ -5,7 +5,7 @@ Abdullah Alshahrani · Maharshi Saragadam · Mohammed Saeed M Alghamdi · Varshi
 
 > **Status: Smart Contract Design Draft (Nov 1, 2026).** The contract structure, interfaces and
 > core logic are in place and compile. The web UI, IoT simulator script and automated tests are
-> planned for the next milestones (see [Roadmap](#roadmap)).
+> planned for the next milestones (see [Plan](#Plan)).
 
 ---
 
