@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoffeeTrace: trace your coffee</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.17.0/dist/ethers.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="batch.html">
+      <svg viewBox="0 0 26 26" aria-hidden="true"><ellipse cx="13" cy="13" rx="8" ry="11.5" transform="rotate(35 13 13)" fill="#e69f00"/><path d="M8.5 20.5c1-5 8-10 9-15" fill="none" stroke="#14213d" stroke-width="2" stroke-linecap="round"/></svg>
+      CoffeeTrace
+    </a>
+  </div>
+</header>
+
+<main class="page page-narrow">
+  <div class="intro">
+    <h1>Trace your coffee</h1>
+    <p>Enter the batch number from your bag to see where it was grown and who handled it.
+      The record is read straight from the Polygon Amoy blockchain.</p>
+  </div>
+
+  <section class="panel">
+    <form id="lookupForm" class="row">
+      <label>Batch number
+        <input id="batchId" type="number" min="1" step="1" required placeholder="1">
+      </label>
+      <button type="submit">Trace batch</button>
+    </form>
+    <div id="status" class="status" role="status"></div>
+  </section>
+
+  <div id="result" hidden>
+    <section class="panel">
+      <p class="origin" id="origin"></p>
+      <div class="muted" id="headline"></div>
+      <div class="steps" id="steps"></div>
+      <div class="badges">
+        <a class="badge ok" id="chainBadge" target="_blank" rel="noopener">✓ Verified on blockchain</a>
+        <span class="badge" id="certBadge"></span>
+      </div>
+    </section>
+
+    <section class="panel" id="mapCard" hidden>
+      <h2>Where it was grown</h2>
+      <iframe id="map" title="Map of the farm location" loading="lazy"></iframe>
+      <div class="muted" style="margin-top:8px"><span id="mapCoords"></span>.
+        <a id="mapLink" target="_blank" rel="noopener">Open a larger map</a></div>
+    </section>
+
+    <section class="panel">
+      <h2>Batch details</h2>
+      <dl id="fields"></dl>
+    </section>
+
+    <section class="panel">
+      <h2>Journey</h2>
+      <ol class="journey" id="journey"></ol>
+      <p class="muted" style="margin:16px 0 0">Company names are labels added by CoffeeTrace.
+        The addresses are the on-chain record.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Shipping conditions</h2>
+      <div id="readings"></div>
+    </section>
+
+    <p class="muted footnote">
+      This record is stored in a public smart contract and cannot be edited after the fact.
+      <a id="explorerLink" target="_blank" rel="noopener">View the contract on Polygonscan</a>.
+    </p>
+  </div>
+</main>
+
+<script>
+// Read-only page: no wallet needed. Everything comes from the contract's view functions.
+const CONTRACT_ADDRESS = "0x34E365615DD97DB3Ac295d0507466bc019762F75";
+// Public Amoy RPC endpoints, tried in order (public endpoints are rate-limited and sometimes down).
+const RPC_URLS = [
+  "https://rpc-amoy.polygon.technology",
+  "https://polygon-amoy-bor-rpc.publicnode.com",
+  "https://polygon-amoy.drpc.org",
+];
+const EXPLORER = "https://amoy.polygonscan.com";
+const IPFS_GATEWAY = "https://ipfs.io/ipfs/";
+
+// Friendly names for stakeholder wallets come from names.json (same folder as this page).
+// The contract only stores addresses, so names are labels; unknown addresses show their role instead.
+let NAMES = {};
+const namesReady = fetch("names.json", { cache: "no-cache" })
+  .then((res) => (res.ok ? res.json() : {}))
+  .then((json) => { NAMES = json; })
+  .catch((e) => console.warn("names.json could not be loaded; showing roles only.", e));
+const nameOf = (address) => {
+  const key = Object.keys(NAMES).find((k) => k.toLowerCase() === address.toLowerCase());
+  return key && typeof NAMES[key] === "string" ? NAMES[key] : null;
+};
+
+const ABI = [
+  "function getBatch(uint256 batchId) view returns (tuple(uint256 id, string origin, string geolocation, string variety, uint256 weightKg, uint256 harvestDate, uint8 status, bool certified, string certificateCID, uint256 createdAt))",
+  "function getCustodyHistory(uint256 batchId) view returns (address[])",
+  "function getConditionReadings(uint256 batchId) view returns (tuple(int256 temperatureX10, uint256 humidityX10, uint256 timestamp)[])",
+  "function hasRole(bytes32 role, address account) view returns (bool)",
+  "event BatchRegistered(uint256 indexed batchId, address indexed farmer, string origin, uint256 weightKg)",
+  "error BatchDoesNotExist(uint256 batchId)",
+];
+
+const STATUS = ["Harvested", "Exported", "Roasted", "Sold"];
+const CHAIN_ROLES = ["Farmer", "Exporter", "Roaster", "Retailer"];
+
+const $ = (id) => document.getElementById(id);
+// batchMaxCount: 1 sends one request per call; some public endpoints reject batched requests.
+const contracts = RPC_URLS.map((url) => new ethers.Contract(
+  CONTRACT_ADDRESS, ABI, new ethers.JsonRpcProvider(url, 80002, { staticNetwork: true, batchMaxCount: 1 })));
+let contract = contracts[0];
+
+// Run a read against each endpoint until one answers. A contract revert is a real answer, so stop there.
+async function read(fn) {
+  let lastError;
+  for (const c of contracts) {
+    try {
+      const result = await fn(c);
+      contract = c; // keep using the endpoint that works
+      return result;
+    } catch (e) {
+      if (e?.revert) throw e;
+      lastError = e;
+      console.warn("RPC endpoint failed, trying the next one:", e);
+    }
+  }
+  throw lastError;
+}
+
+const fmtDate = (secs) => new Date(Number(secs) * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
+const fmtDateTime = (secs) => new Date(Number(secs) * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
+// Which supply-chain roles does this address hold? (Empty = an ordinary customer.)
+async function chainRolesOf(address) {
+  const flags = await Promise.all(CHAIN_ROLES.map((r) =>
+    contract.hasRole(ethers.id(r.toUpperCase() + "_ROLE"), address)));
+  return CHAIN_ROLES.filter((_, i) => flags[i]);
+}
+
+// Find the transaction that registered this batch, without scanning the whole chain:
+// the batch's createdAt is the timestamp of its block, so binary-search for that block,
+// then read the BatchRegistered event from just those few blocks.
+async function findRegistrationTx(id, createdAt) {
+  const provider = contract.runner;
+  const target = Number(createdAt);
+  let lo = 0, hi = await provider.getBlockNumber();
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const block = await provider.getBlock(mid);
+    if (block.timestamp < target) lo = mid + 1; else hi = mid;
+  }
+  const logs = await contract.queryFilter(contract.filters.BatchRegistered(id), Math.max(lo - 2, 0), lo + 2);
+  return logs.length ? logs[0].transactionHash : null;
+}
+
+let shownId = null; // batch currently on screen
+
+async function show(id) {
+  shownId = id;
+  const status = $("status");
+  $("result").hidden = true;
+  status.className = "status pending";
+  status.textContent = "Reading from the blockchain";
+  try {
+    await namesReady;
+    const [b, history, readings] = await read((c) => Promise.all([
+      c.getBatch(id), c.getCustodyHistory(id), c.getConditionReadings(id),
+    ]));
+    const roles = await Promise.all(history.map(chainRolesOf));
+    const stage = Number(b.status);
+
+    $("origin").textContent = b.origin;
+    $("headline").textContent = `Batch ${b.id}: ${b.weightKg} kg of ${b.variety || "coffee"}, harvested ${fmtDate(b.harvestDate)}`;
+
+    const badge = $("certBadge");
+    badge.className = "badge" + (b.certified ? " ok" : "");
+    badge.textContent = b.certified ? "✓ Certified" : "Not certified";
+
+    // "Verified on blockchain": link to this batch's on-chain history now,
+    // then upgrade the link to the exact registration transaction once it is found.
+    const chainBadge = $("chainBadge");
+    chainBadge.href = `${EXPLORER}/token/${CONTRACT_ADDRESS}?a=${id}`;
+    chainBadge.title = "See this batch's transactions on Polygonscan";
+    findRegistrationTx(id, b.createdAt).then((hash) => {
+      if (hash && shownId === id) {
+        chainBadge.href = `${EXPLORER}/tx/${hash}`;
+        chainBadge.title = "See the transaction that registered this batch";
+      }
+    }).catch((e) => console.warn("Could not look up the registration transaction:", e));
+
+    $("steps").replaceChildren(...STATUS.map((s, i) =>
+      el("div", { className: "step" + (i < stage ? " done" : i === stage ? " now" : ""), textContent: s,
+                  title: i < stage ? "Completed" : i === stage ? "Current stage" : "Not reached yet" })));
+
+    // Details
+    const gps = b.geolocation.trim();
+    const [lat, lon] = gps.split(",").map((v) => Number(v.trim()));
+    const gpsOk = /^-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?$/.test(gps) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+    const mapUrl = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=11/${lat}/${lon}`;
+    const gpsNode = gpsOk ? el("a", { href: mapUrl, target: "_blank", rel: "noopener", textContent: gps }) : gps;
+
+    // Map with a pin on the farm (OpenStreetMap embed, no extra library needed)
+    $("mapCard").hidden = !gpsOk;
+    if (gpsOk) {
+      const d = 0.25; // degrees shown around the pin
+      $("map").src = "https://www.openstreetmap.org/export/embed.html?bbox=" +
+        [lon - d, lat - d, lon + d, lat + d].join("%2C") + `&layer=mapnik&marker=${lat}%2C${lon}`;
+      $("mapCoords").textContent = `${b.origin} (${gps})`;
+      $("mapLink").href = mapUrl;
+    }
+    const certNode = b.certified
+      ? el("a", { href: IPFS_GATEWAY + encodeURIComponent(b.certificateCID), target: "_blank", rel: "noopener",
+                  textContent: "View certificate (IPFS)" })
+      : "None on record";
+    const fields = [
+      ["Origin", b.origin], ["Farm location", gpsNode], ["Variety", b.variety || "—"],
+      ["Weight", `${b.weightKg} kg`], ["Harvested", fmtDate(b.harvestDate)],
+      ["Registered", fmtDate(b.createdAt)], ["Certificate", certNode],
+    ];
+    $("fields").replaceChildren(...fields.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, v)]));
+
+    // Journey: every address that has held the batch, in order
+    $("journey").replaceChildren(...history.map((addr, i) => {
+      const role = i === 0 ? "Farmer" : (roles[i].filter((r) => r !== "Farmer").join(" / ") || "Customer");
+      const name = nameOf(addr);
+      return el("li", {},
+        name ? el("div", { className: "who" }, name, el("span", { className: "role", textContent: role }))
+             : el("div", { className: "who", textContent: role }),
+        el("a", { className: "mono", href: `${EXPLORER}/address/${addr}`, target: "_blank", rel: "noopener",
+                  textContent: addr }),
+        ...(i === history.length - 1 ? [el("div", { className: "holder-note", textContent: "Holds the batch now" })] : []));
+    }));
+
+    // Sensor readings (stored x10 on-chain)
+    if (readings.length === 0) {
+      $("readings").replaceChildren(el("div", { className: "muted", textContent: "No sensor readings recorded." }));
+    } else {
+      $("readings").replaceChildren(el("table", {},
+        el("tr", {}, el("th", { textContent: "When" }), el("th", { textContent: "Temperature" }),
+                     el("th", { textContent: "Humidity" })),
+        ...readings.map((r) => el("tr", {},
+          el("td", { textContent: fmtDateTime(r.timestamp) }),
+          el("td", { textContent: (Number(r.temperatureX10) / 10).toFixed(1) + " °C" }),
+          el("td", { textContent: (Number(r.humidityX10) / 10).toFixed(1) + " %" })))));
+    }
+
+    status.textContent = "";
+    $("result").hidden = false;
+  } catch (e) {
+    console.error(e);
+    status.className = "status err";
+    status.textContent = e?.revert?.name === "BatchDoesNotExist"
+      ? `No batch with ID ${id} was found.`
+      : "Could not read from the blockchain. Details: " + (e?.shortMessage || e?.message || String(e));
+  }
+}
+
+$("explorerLink").href = `${EXPLORER}/address/${CONTRACT_ADDRESS}`;
+
+$("lookupForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const id = $("batchId").value;
+  history.replaceState(null, "", "?id=" + encodeURIComponent(id)); // shareable link
+  show(BigInt(id));
+});
+
+// A QR code points at batch.html?id=<batchId>, so load that batch straight away.
+const param = new URLSearchParams(location.search).get("id");
+if (param && /^[1-9]\d*$/.test(param)) {
+  $("batchId").value = param;
+  show(BigInt(param));
+}
+</script>
+</body>
+</html>

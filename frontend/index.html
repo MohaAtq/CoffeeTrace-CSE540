@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoffeeTrace: manage coffee batches</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.17.0/dist/ethers.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">
+      <svg viewBox="0 0 26 26" aria-hidden="true"><ellipse cx="13" cy="13" rx="8" ry="11.5" transform="rotate(35 13 13)" fill="#e69f00"/><path d="M8.5 20.5c1-5 8-10 9-15" fill="none" stroke="#14213d" stroke-width="2" stroke-linecap="round"/></svg>
+      CoffeeTrace
+    </a>
+    <nav class="topnav"><a href="batch.html">Customer batch page</a></nav>
+    <button id="connectBtn">Connect MetaMask</button>
+  </div>
+</header>
+
+<main class="page">
+  <div class="intro">
+    <h1>Manage coffee batches</h1>
+    <p>Register a batch at the farm and hand it along the chain. Every step is recorded on
+      Polygon Amoy in contract <a id="contractLink" class="mono" target="_blank" rel="noopener">contract</a>.</p>
+  </div>
+
+  <!-- Wallet -->
+  <section class="panel">
+    <h2>Your account</h2>
+    <div id="walletInfo" class="muted">Not connected. Connect MetaMask to register or move batches.</div>
+    <div id="walletStatus" class="status" role="status"></div>
+    <button id="fixRpcBtn" class="ghost" hidden style="margin-top:10px">Fix MetaMask network connection</button>
+  </section>
+
+  <div class="layout">
+    <!-- Find / move -->
+    <section class="panel">
+      <h2>Find a batch</h2>
+      <p class="hint">See where a batch is, and move it on if your account holds it.</p>
+      <form id="lookupForm" class="row">
+        <label>Batch ID
+          <input id="batchId" type="number" min="1" step="1" required placeholder="1">
+        </label>
+        <button type="submit" class="ghost">Load batch</button>
+      </form>
+      <div id="lookupStatus" class="status" role="status"></div>
+
+      <div id="batchView" hidden>
+        <div class="steps" id="steps"></div>
+        <dl id="batchFields"></dl>
+        <h3 class="subhead">Custody history</h3>
+        <ol id="custody"></ol>
+
+        <hr>
+        <h3 class="subhead" style="margin-top:0">Next step</h3>
+        <div id="actionNote"></div>
+
+        <div id="advanceBox" hidden>
+          <button id="advanceBtn"></button>
+          <div id="advanceStatus" class="status" role="status"></div>
+        </div>
+
+        <form id="transferForm" hidden style="margin-top:14px">
+          <div class="row">
+            <label><span id="transferLabel">Transfer to</span>
+              <input id="transferTo" class="mono" required placeholder="0x…">
+            </label>
+            <button type="submit">Transfer batch</button>
+          </div>
+          <div id="transferStatus" class="status" role="status"></div>
+        </form>
+
+        <hr>
+        <div class="qrRow">
+          <div id="qr"></div>
+          <div>
+            <h3 class="subhead" style="margin-top:0">Customer QR code</h3>
+            <div class="muted">Scanning it opens this batch's history. No wallet needed.</div>
+            <a id="publicLink" target="_blank" rel="noopener">Open the customer page for this batch</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="side">
+      <!-- Register -->
+      <section class="panel">
+        <h2>Register a batch</h2>
+        <p class="hint">Farmer accounts only. The new batch starts in your custody.</p>
+        <form id="registerForm">
+          <label>Origin (farm and region)
+            <input id="rOrigin" required placeholder="Finca El Paraiso, Huila, Colombia">
+          </label>
+          <label>GPS coordinates (latitude, longitude)
+            <input id="rGeo" required placeholder="2.1167,-75.8833">
+          </label>
+          <div class="grid">
+            <label>Variety
+              <input id="rVariety" placeholder="Arabica">
+            </label>
+            <label>Weight (kg)
+              <input id="rWeight" type="number" min="1" step="1" required placeholder="500">
+            </label>
+          </div>
+          <label>Harvest date
+            <input id="rHarvest" type="date" required>
+          </label>
+          <button type="submit">Register batch</button>
+          <div id="registerStatus" class="status" role="status"></div>
+        </form>
+      </section>
+
+      <!-- Admin -->
+      <section class="panel" id="adminCard" hidden>
+        <h2>Grant a role</h2>
+        <p class="hint">Admin account only. A role lets an account take its step in the chain.</p>
+        <form id="grantForm">
+          <label>Role
+            <select id="grantRole"></select>
+          </label>
+          <label>Account address
+            <input id="grantTo" class="mono" required placeholder="0x…">
+          </label>
+          <button type="submit">Grant role</button>
+          <div id="grantStatus" class="status" role="status"></div>
+        </form>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const CONTRACT_ADDRESS = "0x34E365615DD97DB3Ac295d0507466bc019762F75";
+
+const AMOY = {
+  chainId: "0x13882", // 80002
+  chainName: "Polygon Amoy Testnet",
+  nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+  // Public endpoints, tried in order (they are rate-limited and sometimes down).
+  rpcUrls: [
+    "https://polygon-amoy-bor-rpc.publicnode.com",
+    "https://polygon-amoy.drpc.org",
+    "https://polygon-amoy.api.onfinality.io/public",
+    "https://rpc-amoy.polygon.technology",
+  ],
+  blockExplorerUrls: ["https://amoy.polygonscan.com"],
+};
+const EXPLORER = AMOY.blockExplorerUrls[0];
+
+// Only the parts of the ABI this page uses (full ABI: CoffeeTrace.abi.json).
+const ABI = [
+  "function registerBatch(string origin, string geolocation, string variety, uint256 weightKg, uint256 harvestDate) returns (uint256 batchId)",
+  "function transferBatch(uint256 batchId, address to)",
+  "function updateStatus(uint256 batchId, uint8 newStatus)",
+  "function grantRole(bytes32 role, address account)",
+  "function hasRole(bytes32 role, address account) view returns (bool)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function totalBatches() view returns (uint256)",
+  "function getCustodyHistory(uint256 batchId) view returns (address[])",
+  "function getBatch(uint256 batchId) view returns (tuple(uint256 id, string origin, string geolocation, string variety, uint256 weightKg, uint256 harvestDate, uint8 status, bool certified, string certificateCID, uint256 createdAt))",
+  "event BatchRegistered(uint256 indexed batchId, address indexed farmer, string origin, uint256 weightKg)",
+  "event BatchTransferred(uint256 indexed batchId, address indexed from, address indexed to)",
+  "event StatusUpdated(uint256 indexed batchId, uint8 newStatus, address indexed updatedBy)",
+  "error BatchDoesNotExist(uint256 batchId)",
+  "error NotBatchOwner(uint256 batchId, address caller)",
+  "error InvalidStatusTransition(uint8 current, uint8 requested)",
+  "error MissingRoleForStatus(uint8 requested, address caller)",
+  "error InvalidRecipient(address to)",
+  "error InvalidInput(string reason)",
+  "error DirectTransferDisabled()",
+  "error AccessControlUnauthorizedAccount(address account, bytes32 neededRole)",
+];
+
+const STATUS = ["Harvested", "Exported", "Roasted", "Sold"];
+
+// Role name -> bytes32 id (same values as the constants in CoffeeTrace.sol).
+const ROLES = { Admin: ethers.ZeroHash };
+for (const r of ["Farmer", "Exporter", "Roaster", "Retailer", "Certifier", "Oracle"]) {
+  ROLES[r] = ethers.id(r.toUpperCase() + "_ROLE");
+}
+const roleName = (hash) => Object.keys(ROLES).find((k) => ROLES[k] === hash) || hash;
+
+// Friendly names for stakeholder wallets come from names.json (same folder as this page).
+// The contract only stores addresses, so names are labels; unknown addresses show their role instead.
+let NAMES = {};
+const namesReady = fetch("names.json", { cache: "no-cache" })
+  .then((res) => (res.ok ? res.json() : {}))
+  .then((json) => { NAMES = json; })
+  .catch((e) => console.warn("names.json could not be loaded; showing roles only.", e));
+const nameOf = (address) => {
+  const key = Object.keys(NAMES).find((k) => k.toLowerCase() === address.toLowerCase());
+  return key && typeof NAMES[key] === "string" ? NAMES[key] : null;
+};
+
+// NEXT_ROLE[status] = role that must receive the batch at this status,
+// and also the role that may move it on to status + 1.
+const NEXT_ROLE = ["Exporter", "Roaster", "Retailer"];
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const iface = new ethers.Interface(ABI);
+
+let signer = null;     // connected MetaMask account
+let contract = null;   // contract bound to the signer (for transactions)
+let me = null;         // connected address
+let myRoles = [];      // role names held by `me`
+let current = null;    // batch currently shown: { id, status, owner }
+
+// All reads go straight to public RPC endpoints, not through MetaMask, so the page can show
+// batches and roles even when the wallet's own network connection is misbehaving.
+// MetaMask is only used to sign and send transactions.
+const readers = AMOY.rpcUrls.map((url) => new ethers.Contract(
+  CONTRACT_ADDRESS, ABI,
+  new ethers.JsonRpcProvider(url, 80002, { staticNetwork: true, batchMaxCount: 1 })));
+let reader = readers[0];
+let readerUrl = AMOY.rpcUrls[0]; // endpoint that last answered
+
+// Run a read against each endpoint until one answers. A contract revert is a real answer, so stop there.
+async function read(fn) {
+  let lastError;
+  for (let i = 0; i < readers.length; i++) {
+    try {
+      const result = await fn(readers[i]);
+      reader = readers[i];
+      readerUrl = AMOY.rpcUrls[i];
+      return result;
+    } catch (e) {
+      if (e?.revert) throw e;
+      lastError = e;
+      console.warn("RPC endpoint failed, trying the next one:", AMOY.rpcUrls[i], e);
+    }
+  }
+  throw lastError;
+}
+// ---------------------------------------------------------------------------
+// Small UI helpers
+// ---------------------------------------------------------------------------
+const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
+const same = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+const fmtDate = (secs) => new Date(Number(secs) * 1000).toLocaleDateString();
+
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
+function setStatus(node, kind, text, txHash) {
+  node.className = "status " + kind;
+  node.replaceChildren(text);
+  if (txHash) {
+    node.append(" ", el("a", { href: `${EXPLORER}/tx/${txHash}`, target: "_blank", rel: "noopener",
+                               textContent: "View transaction" }));
+  }
+}
+
+// Turn a revert / wallet error into a sentence a demo audience can read.
+function explain(e) {
+  if (e?.code === "ACTION_REJECTED" || e?.code === 4001) return "Request rejected in MetaMask.";
+  let rev = e?.revert;
+  if (!rev) {
+    const data = e?.data ?? e?.info?.error?.data ?? e?.error?.data;
+    if (typeof data === "string" && data.length >= 10) {
+      try { rev = iface.parseError(data); } catch { /* unknown error data */ }
+    }
+  }
+  if (rev) {
+    const a = rev.args;
+    switch (rev.name) {
+      case "AccessControlUnauthorizedAccount":
+        return `This account does not have the ${roleName(a[1])} role. Ask the admin to grant it.`;
+      case "NotBatchOwner":
+        return `This account is not the current holder of batch #${a[0]}.`;
+      case "InvalidRecipient":
+        return "Invalid recipient: it must hold the next role in the chain and cannot be yourself.";
+      case "BatchDoesNotExist":
+        return `Batch #${a[0]} does not exist.`;
+      case "InvalidStatusTransition":
+        return `Status can only move one step forward (now ${STATUS[Number(a[0])]}).`;
+      case "MissingRoleForStatus":
+        return `This account lacks the role needed to mark the batch as ${STATUS[Number(a[0])]}.`;
+      case "InvalidInput":
+        return `Invalid input: ${a[0]}.`;
+      default:
+        return `Transaction would fail: ${rev.name}.`;
+    }
+  }
+  if (e?.code === "INSUFFICIENT_FUNDS") return "Not enough POL for gas. Use the Amoy faucet.";
+  if (e?.code === "UNKNOWN_ERROR" || e?.code === "NETWORK_ERROR" || e?.code === "SERVER_ERROR") {
+    const inner = e?.error?.message || e?.info?.error?.message || e?.info?.responseStatus || "";
+    const code = e?.error?.code ?? e?.info?.error?.code;
+    return "MetaMask could not complete the request on Polygon Amoy" +
+      (inner ? `: ${inner}` : "") + (code !== undefined ? ` (code ${code})` : "") + ".";
+  }
+  if (typeof e?.code === "number" && e?.message) return `MetaMask error: ${e.message} (code ${e.code}).`;
+  return e?.shortMessage || e?.reason || e?.message || String(e);
+}
+
+// Send a transaction and report progress in `node`. Returns the receipt, or null on failure.
+async function send(node, makeTx) {
+  if (!contract) { setStatus(node, "err", "Connect MetaMask first."); return null; }
+  try {
+    setStatus(node, "pending", "Confirm in MetaMask…");
+    const tx = await makeTx();
+    setStatus(node, "pending", "Waiting for confirmation…", tx.hash);
+    const receipt = await tx.wait();
+    setStatus(node, "ok", "Confirmed.", tx.hash);
+    return receipt;
+  } catch (e) {
+    console.error(e);
+    setStatus(node, "err", explain(e));
+    if (e?.code === "UNKNOWN_ERROR" || e?.code === "NETWORK_ERROR") checkWalletRpc();
+    return null;
+  }
+}
+
+async function rolesOf(address) {
+  const names = Object.keys(ROLES);
+  const flags = await read((c) => Promise.all(names.map((n) => c.hasRole(ROLES[n], address))));
+  return names.filter((_, i) => flags[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Wallet
+// ---------------------------------------------------------------------------
+async function ensureAmoy() {
+  const chainId = await window.ethereum.request({ method: "eth_chainId" });
+  if (chainId.toLowerCase() === AMOY.chainId) return;
+  try {
+    await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: AMOY.chainId }] });
+  } catch (e) {
+    if (e.code !== 4902) throw e; // 4902 = MetaMask does not know this chain yet
+    await window.ethereum.request({ method: "wallet_addEthereumChain", params: [AMOY] });
+  }
+}
+
+async function connect() {
+  if (!window.ethereum) {
+    setStatus($("walletStatus"), "err",
+      "MetaMask not found. Install it, and open this page over http://localhost (not file://).");
+    return;
+  }
+  try {
+    await window.ethereum.request({ method: "eth_requestAccounts" });
+    await ensureAmoy();
+    await setup();
+  } catch (e) {
+    console.error(e);
+    setStatus($("walletStatus"), "err", explain(e));
+  }
+}
+
+// (Re)build signer + contract for the account currently selected in MetaMask.
+async function setup() {
+  const provider = new ethers.BrowserProvider(window.ethereum);
+  signer = await provider.getSigner();
+  me = await signer.getAddress();
+  contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+
+  if ((await read((c) => c.runner.getCode(CONTRACT_ADDRESS))) === "0x") {
+    setStatus($("walletStatus"), "err", "No contract found at the configured address on this network.");
+    return;
+  }
+  setStatus($("walletStatus"), "", "");
+
+  myRoles = await rolesOf(me);
+  const info = $("walletInfo");
+  info.className = "";
+  info.replaceChildren(
+    el("div", { className: "mono", textContent: me }),
+    el("div", { style: "margin-top:6px" },
+      ...(myRoles.length
+        ? myRoles.map((r) => el("span", { className: "pill", textContent: r }))
+        : [el("span", { className: "muted", textContent: "No roles yet. Ask the admin to grant one." })]))
+  );
+  $("connectBtn").textContent = short(me);
+  $("adminCard").hidden = !myRoles.includes("Admin");
+
+  if (current) await loadBatch(current.id); // refresh actions for the new account
+  await checkWalletRpc();
+}
+
+// MetaMask sends transactions through its own Amoy endpoint. If that endpoint is down, reads on this
+// page still work but transactions fail, so test it and offer to point MetaMask at a working one.
+async function checkWalletRpc() {
+  try {
+    await window.ethereum.request({ method: "eth_blockNumber" });
+    $("fixRpcBtn").hidden = true;
+    return true;
+  } catch (e) {
+    console.warn("MetaMask's Amoy endpoint is not responding:", e);
+    const node = $("walletStatus");
+    setStatus(node, "err",
+      "MetaMask's connection to Polygon Amoy is not responding, so transactions will fail. " +
+      "This page is reading the blockchain fine through the address below. In MetaMask, click " +
+      "\"Update RPC\", add this as a new RPC URL, select it and save. Then reload this page.");
+    node.append(el("div", { className: "mono", style: "margin-top:6px; user-select:all", textContent: readerUrl }));
+    $("fixRpcBtn").hidden = false;
+    return false;
+  }
+}
+
+$("fixRpcBtn").addEventListener("click", async () => {
+  try {
+    await read((c) => c.runner.getBlockNumber()); // find an endpoint that works right now
+    await window.ethereum.request({
+      method: "wallet_addEthereumChain",
+      params: [{ ...AMOY, rpcUrls: [readerUrl] }],
+    });
+    if (await checkWalletRpc()) setStatus($("walletStatus"), "ok", "MetaMask is connected to Polygon Amoy.");
+  } catch (e) {
+    console.error(e);
+    setStatus($("walletStatus"), "err", explain(e));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Register
+// ---------------------------------------------------------------------------
+$("registerForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const node = $("registerStatus");
+  const harvest = Math.floor(new Date($("rHarvest").value + "T00:00:00").getTime() / 1000);
+
+  const receipt = await send(node, () => contract.registerBatch(
+    $("rOrigin").value.trim(),
+    $("rGeo").value.trim(),
+    $("rVariety").value.trim(),
+    BigInt($("rWeight").value),
+    harvest
+  ));
+  if (!receipt) return;
+
+  // The new batch ID comes from the BatchRegistered event.
+  let id = null;
+  for (const log of receipt.logs) {
+    try {
+      const parsed = iface.parseLog(log);
+      if (parsed?.name === "BatchRegistered") id = parsed.args.batchId;
+    } catch { /* log from another ABI fragment */ }
+  }
+  if (id !== null) {
+    setStatus(node, "ok", `Batch #${id} registered.`, receipt.hash);
+    $("batchId").value = id.toString();
+    await loadBatch(id);
+  }
+  ev.target.reset();
+});
+
+// ---------------------------------------------------------------------------
+// Look up + move
+// ---------------------------------------------------------------------------
+$("lookupForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  loadBatch(BigInt($("batchId").value));
+});
+
+async function loadBatch(id) {
+  const node = $("lookupStatus");
+  try {
+    setStatus(node, "pending", "Loading…");
+    await namesReady;
+    const [b, owner, history] = await read((c) => Promise.all([
+      c.getBatch(id), c.ownerOf(id), c.getCustodyHistory(id),
+    ]));
+    const historyRoles = await Promise.all(history.map(rolesOf));
+    const status = Number(b.status);
+    current = { id, status, owner };
+    setStatus(node, "", "");
+
+    // Stage stepper
+    $("steps").replaceChildren(...STATUS.map((s, i) =>
+      el("div", { className: "step" + (i < status ? " done" : i === status ? " now" : ""), textContent: s,
+                  title: i < status ? "Completed" : i === status ? "Current stage" : "Not reached yet" })));
+
+    // Details
+    const fields = [
+      ["Batch", `#${b.id}`],
+      ["Origin", b.origin],
+      ["GPS", b.geolocation],
+      ["Variety", b.variety || "—"],
+      ["Weight", `${b.weightKg} kg`],
+      ["Harvested", fmtDate(b.harvestDate)],
+      ["Registered", fmtDate(b.createdAt)],
+      ["Certified", b.certified ? `Yes (${b.certificateCID})` : "No"],
+      ["Current holder", (nameOf(owner) ? nameOf(owner) + " · " : "") + owner + (same(owner, me) ? " (you)" : "")],
+    ];
+    $("batchFields").replaceChildren(...fields.flatMap(([k, v]) =>
+      [el("dt", { textContent: k }), el("dd", { textContent: v })]));
+
+    // Custody history
+    $("custody").replaceChildren(...history.map((addr, i) => {
+      const chainRoles = historyRoles[i].filter((r) => r !== "Admin");
+      const name = nameOf(addr);
+      return el("li", {},
+        ...(name ? [el("strong", { textContent: name }), el("br")] : []),
+        el("span", { className: "mono", textContent: addr }), " ",
+        ...chainRoles.map((r) => el("span", { className: "pill", textContent: r })));
+    }));
+
+    // QR code + link to the public customer page (batch.html, same folder as this page)
+    const publicUrl = new URL("batch.html?id=" + id, location.href).href;
+    $("publicLink").href = publicUrl;
+    if (typeof qrcode === "function") {
+      const qr = qrcode(0, "M");
+      qr.addData(publicUrl);
+      qr.make();
+      $("qr").innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+    }
+
+    renderActions();
+    $("batchView").hidden = false;
+  } catch (e) {
+    console.error(e);
+    current = null;
+    $("batchView").hidden = true;
+    setStatus(node, "err", explain(e));
+  }
+}
+
+function renderActions() {
+  const { status, owner } = current;
+  const note = $("actionNote");
+  const isOwner = same(owner, me);
+  $("advanceBox").hidden = true;
+  $("transferForm").hidden = true;
+  setStatus($("advanceStatus"), "", "");
+  setStatus($("transferStatus"), "", "");
+
+  if (!me) { note.textContent = "Connect MetaMask to move this batch."; return; }
+  if (!isOwner) {
+    note.textContent = `Only the current holder (${short(owner)}) can move this batch. Switch to that account in MetaMask.`;
+    return;
+  }
+
+  const sold = status === 3;
+  const canAdvance = !sold && myRoles.includes(NEXT_ROLE[status]);
+
+  if (canAdvance) {
+    $("advanceBtn").textContent = `Mark as ${STATUS[status + 1]}`;
+    $("advanceBox").hidden = false;
+  }
+  $("transferLabel").textContent = sold
+    ? "Transfer to customer (any address)"
+    : `Transfer to ${NEXT_ROLE[status]} (address must hold that role)`;
+  $("transferForm").hidden = false;
+
+  note.textContent = sold
+    ? "This batch is sold. You can hand it to the customer."
+    : canAdvance
+      ? `You hold this batch as ${NEXT_ROLE[status]}: mark it as ${STATUS[status + 1]}, then transfer it on.`
+      : `You hold this batch. Next step: transfer it to the ${NEXT_ROLE[status]}.`;
+}
+
+$("advanceBtn").addEventListener("click", async () => {
+  const { id, status } = current;
+  const receipt = await send($("advanceStatus"), () => contract.updateStatus(id, status + 1));
+  if (receipt) {
+    await loadBatch(id);
+    setStatus($("lookupStatus"), "ok", `Batch #${id} marked as ${STATUS[status + 1]}.`, receipt.hash);
+  }
+});
+
+$("transferForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const node = $("transferStatus");
+  const { id, status } = current;
+  const to = $("transferTo").value.trim();
+
+  // Check the obvious problems before opening MetaMask.
+  if (!ethers.isAddress(to)) return setStatus(node, "err", "That is not a valid address.");
+  if (same(to, me)) return setStatus(node, "err", "You already hold this batch.");
+  if (status < 3 && !(await read((c) => c.hasRole(ROLES[NEXT_ROLE[status]], to)))) {
+    return setStatus(node, "err", `That address does not have the ${NEXT_ROLE[status]} role.`);
+  }
+
+  const receipt = await send(node, () => contract.transferBatch(id, to));
+  if (receipt) {
+    $("transferTo").value = "";
+    await loadBatch(id);
+    setStatus($("lookupStatus"), "ok", `Batch #${id} transferred to ${short(to)}.`, receipt.hash);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+$("grantRole").replaceChildren(...Object.keys(ROLES).filter((r) => r !== "Admin")
+  .map((r) => el("option", { value: r, textContent: r })));
+
+$("grantForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const node = $("grantStatus");
+  const role = $("grantRole").value;
+  const to = $("grantTo").value.trim();
+  if (!ethers.isAddress(to)) return setStatus(node, "err", "That is not a valid address.");
+
+  const receipt = await send(node, () => contract.grantRole(ROLES[role], to));
+  if (receipt) {
+    setStatus(node, "ok", `${role} role granted to ${short(to)}.`, receipt.hash);
+    if (same(to, me)) await setup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Start-up
+// ---------------------------------------------------------------------------
+$("contractLink").href = `${EXPLORER}/address/${CONTRACT_ADDRESS}`;
+$("contractLink").textContent = short(CONTRACT_ADDRESS);
+$("rHarvest").max = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+$("connectBtn").addEventListener("click", connect);
+
+if (window.ethereum) {
+  // Switching account in MetaMask (farmer -> exporter -> ...) updates the page in place.
+  window.ethereum.on("accountsChanged", (accounts) => {
+    if (accounts.length && contract) setup().catch(console.error);
+    else if (!accounts.length) location.reload();
+  });
+  window.ethereum.on("chainChanged", () => location.reload());
+
+  // If the site is already authorised and on Amoy, reconnect silently.
+  (async () => {
+    const [accounts, chainId] = await Promise.all([
+      window.ethereum.request({ method: "eth_accounts" }),
+      window.ethereum.request({ method: "eth_chainId" }),
+    ]);
+    if (accounts.length && chainId.toLowerCase() === AMOY.chainId) await setup();
+  })().catch(console.error);
+}
+</script>
+</body>
+</html>
